@@ -1,0 +1,52 @@
+// Redaction and re-identification payloads for unblockllm.
+// Used between proxy, NER service, and state store. No raw PII in logs.
+
+syntax = "proto3";
+
+package unblockllm.redaction.v1;
+
+option go_package = "github.com/unblockllm/unblockllm/proto/gen/go/redaction/v1;redactionv1";
+
+// EntityType matches NER labels (PER, ORG, LOC, etc.) and regex types.
+enum EntityType {
+  ENTITY_TYPE_UNSPECIFIED = 0;
+  PERSON = 1;
+  ORGANIZATION = 2;
+  LOCATION = 3;
+  EMAIL = 4;
+  PHONE = 5;
+  SSN = 6;
+  DATE = 7;
+  CUSTOM = 8;
+}
+
+// Span of text identified as PII (byte offsets; no raw value in proto).
+message EntitySpan {
+  uint32 start = 1;
+  uint32 end = 2;
+  EntityType entity_type = 3;
+  float score = 4;  // NER confidence 0..1; optional
+}
+
+// MaskStrategy for redaction.
+enum MaskStrategy {
+  MASK_STRATEGY_UNSPECIFIED = 0;
+  PLACEHOLDER = 1;  // e.g. [PERSON_1]
+  TYPE_TAG = 2;     // e.g. [PER]
+  HASH = 3;         // deterministic for re-id
+}
+
+// RedactionRequest: request_id only for audit; no raw text in this message.
+// Actual text is passed in-band or via separate channel to avoid logging.
+message RedactionRequest {
+  string request_id = 1;
+  MaskStrategy strategy = 2;
+  repeated EntityType entity_types = 3;
+}
+
+// RedactionResult: masked text + mapping. mapping contains only offsets and types.
+message RedactionResult {
+  string masked_text = 1;
+  repeated EntitySpan mapping = 2;
+  uint32 entity_count = 3;
+}

@@ -1,0 +1,23 @@
+# Production proxy image: multi-stage, distroless, non-root. Target <100MB.
+# Build from repo root: docker build -f Dockerfile.proxy .
+
+# Use bookworm (latest stable) for edition2024-capable Cargo (transitive deps)
+FROM rust:bookworm AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY proto ./proto
+
+# protoc required by unblock-core build.rs (prost)
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
+
+# Build release (no debug symbols for smaller image)
+RUN cargo build --release --package unblock-proxy && \
+    strip /build/target/release/unblock-proxy
+
+# Runtime: distroless cc (glibc); non-root
+FROM gcr.io/distroless/cc-debian12:nonroot
+USER nonroot:nonroot
+EXPOSE 8080
+COPY --from=builder /build/target/release/unblock-proxy /unblock-proxy
+ENTRYPOINT ["/unblock-proxy"]

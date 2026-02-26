@@ -1,0 +1,18 @@
+# Policy engine: which entity types to mask vs block (Phase 3).
+# Hot-reload: proxy watches this file; change and save to apply without restart.
+# No PII in this file.
+
+# Entity types to redact with placeholders (e.g. [EMAIL_1]). Empty = all detected.
+mask:
+  - EMAIL
+  - PHONE
+  - PERSON
+  - ORGANIZATION
+  - LOCATION
+  - SSN
+  - DATE
+
+# Entity types that cause the request to be rejected (400). Use for high-sensitivity (e.g. SSN).
+block: []
+# Example: block SSN and return 400 if SSN detected:
+# block: [SSN]

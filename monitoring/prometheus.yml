@@ -1,0 +1,14 @@
+# Prometheus config for unblockllm. Add scrape targets when proxy/dashboard expose /metrics.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  # Example: when proxy exposes /metrics (future)
+  # - job_name: proxy
+  #   static_configs:
+  #     - targets: ["proxy:8080"]
+  #   metrics_path: /metrics
