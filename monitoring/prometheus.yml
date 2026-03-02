@@ -7,8 +7,8 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
-  # Example: when proxy exposes /metrics (future)
-  # - job_name: proxy
-  #   static_configs:
-  #     - targets: ["proxy:8080"]
-  #   metrics_path: /metrics
+  - job_name: proxy
+    static_configs:
+      - targets: ["proxy:8080"]
+    metrics_path: /metrics
+    scrape_interval: 5s
