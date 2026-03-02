@@ -14,10 +14,37 @@ use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use opentelemetry::metrics::{Counter, Histogram, Meter};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tracing::info;
 use unblock_core::EntityType;
+
+pub struct PiiMetrics {
+    pub entities_detected: Counter<u64>,
+    pub masking_duration: Histogram<f64>,
+    pub upstream_duration: Histogram<f64>,
+}
+
+static PII_METRICS: OnceLock<PiiMetrics> = OnceLock::new();
+
+/// Initialize PII-specific metrics. Call once at startup.
+pub fn init_pii_metrics(meter: &Meter) {
+    let _ = PII_METRICS.get_or_init(|| PiiMetrics {
+        entities_detected: meter
+            .u64_counter("pii_entities_detected_total")
+            .with_description("Total PII entities detected by type")
+            .build(),
+        masking_duration: meter
+            .f64_histogram("pii_masking_duration_seconds")
+            .with_description("Time spent on NER + masking per request")
+            .build(),
+        upstream_duration: meter
+            .f64_histogram("upstream_request_duration_seconds")
+            .with_description("Time waiting for upstream LLM response")
+            .build(),
+    });
+}
 
 /// Map store errors to HTTP 503 (Block Mode when Redis unavailable).
 fn map_store_error(e: StateError) -> (StatusCode, String) {
@@ -70,19 +97,19 @@ pub async fn chat_completions(
     State(state): State<Arc<ChatState>>,
     req: Request<Body>,
 ) -> Result<Response, (StatusCode, String)> {
-    let request_id = state
-        .store
-        .new_request()
-        .await
-        .map_err(|e| map_store_error(e))?;
+    let request_id = state.store.new_request().await.map_err(map_store_error)?;
     let (parts, body) = req.into_parts();
     let body_bytes = axum::body::to_bytes(body, usize::MAX)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut body_value: serde_json::Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
-    let mut chat: OpenAiChatRequest = serde_json::from_value(body_value.clone())
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid chat request: {}", e)))?;
+    let mut chat: OpenAiChatRequest = serde_json::from_value(body_value.clone()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid chat request: {}", e),
+        )
+    })?;
 
     let start = Instant::now();
     let mut total_entity_count: u32 = 0;
@@ -90,7 +117,9 @@ pub async fn chat_completions(
 
     // Mask each message content (policy filter + block check)
     for msg in chat.messages.iter_mut() {
-        let Some(ref content) = msg.content else { continue };
+        let Some(ref content) = msg.content else {
+            continue;
+        };
         if content.is_empty() {
             continue;
         }
@@ -124,23 +153,47 @@ pub async fn chat_completions(
     }
 
     let entity_type_tags: Vec<String> = entity_type_set.into_iter().collect();
-    state.audit.log(&request_id, None, total_entity_count, &entity_type_tags).await;
+    state
+        .audit
+        .log(&request_id, None, total_entity_count, &entity_type_tags)
+        .await;
 
     let mask_elapsed = start.elapsed();
     tracing::debug!(request_id = %request_id, mask_ms = mask_elapsed.as_millis(), "masked request");
 
-    let url = format!("{}/v1/chat/completions", state.openai_base.trim_end_matches('/'));
+    if let Some(pii) = PII_METRICS.get() {
+        pii.masking_duration
+            .record(mask_elapsed.as_secs_f64(), &[]);
+        for tag in &entity_type_tags {
+            pii.entities_detected.add(
+                1,
+                &[opentelemetry::KeyValue::new("entity_type", tag.clone())],
+            );
+        }
+    }
+
+    let url = format!(
+        "{}/v1/chat/completions",
+        state.openai_base.trim_end_matches('/')
+    );
+    let mut fwd_headers = parts.headers.clone();
+    fwd_headers.remove(axum::http::header::CONTENT_LENGTH);
+    let upstream_start = Instant::now();
     let upstream = state
         .client
         .post(&url)
-        .headers(parts.headers.clone())
+        .headers(fwd_headers)
         .json(&body_value)
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if let Some(pii) = PII_METRICS.get() {
+        pii.upstream_duration
+            .record(upstream_start.elapsed().as_secs_f64(), &[]);
+    }
 
     let status = upstream.status();
-    let headers = upstream.headers().clone();
+    let mut headers = upstream.headers().clone();
 
     if chat.stream {
         let mapping = state
@@ -151,12 +204,14 @@ pub async fn chat_completions(
             .unwrap_or_default();
         let store = state.store.clone();
         let rid = request_id.clone();
-        let stream = upstream.bytes_stream().map(move |r: Result<Bytes, reqwest::Error>| {
-            let r = r.map_err(|e| e.to_string())?;
-            let text = String::from_utf8_lossy(&r);
-            let out = reidentify_map(&text, &mapping);
-            Ok::<_, String>(Bytes::from(out))
-        });
+        let stream = upstream
+            .bytes_stream()
+            .map(move |r: Result<Bytes, reqwest::Error>| {
+                let r = r.map_err(|e| e.to_string())?;
+                let text = String::from_utf8_lossy(&r);
+                let out = reidentify_map(&text, &mapping);
+                Ok::<_, String>(Bytes::from(out))
+            });
         tokio::spawn(async move {
             let _ = store.remove(&rid).await;
         });
@@ -204,9 +259,12 @@ pub async fn chat_completions(
         "chat completion done"
     );
 
-    let json = serde_json::to_vec(&resp_body).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let json = serde_json::to_vec(&resp_body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut res = Response::new(Body::from(json));
     *res.status_mut() = status;
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    headers.remove(axum::http::header::TRANSFER_ENCODING);
     *res.headers_mut() = headers;
     res.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
@@ -234,7 +292,10 @@ mod tests {
             policy: PolicyEngine::load(std::path::Path::new("/nonexistent")),
         });
         let app = axum::Router::new()
-            .route("/v1/chat/completions", axum::routing::post(chat_completions))
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(chat_completions),
+            )
             .with_state(state);
         let req = Request::builder()
             .uri("/v1/chat/completions")

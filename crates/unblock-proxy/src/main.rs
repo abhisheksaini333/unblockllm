@@ -4,13 +4,15 @@
 
 use axum::routing::{get, post};
 use axum::Router;
+use opentelemetry::metrics::MeterProvider;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use unblock_proxy::audit::{pool_from_env, AuditLog};
-use unblock_proxy::handlers::chat::{chat_completions, ChatState};
+use unblock_proxy::handlers::chat::{chat_completions, init_pii_metrics, ChatState};
 use unblock_proxy::handlers::health::{health_check, readiness_check, HealthState};
+use unblock_proxy::middleware::metrics::{init_http_metrics, metrics_layer};
 use unblock_proxy::ner::NerEngine;
 use unblock_proxy::policy::PolicyEngine;
 use unblock_proxy::state::Store;
@@ -23,10 +25,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..Default::default()
     });
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let log_format = std::env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
+    if log_format == "json" {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
+    // Prometheus + OpenTelemetry metrics
+    let prometheus_registry = prometheus::Registry::new();
+    let prometheus_exporter = opentelemetry_prometheus::exporter()
+        .with_registry(prometheus_registry.clone())
+        .build()
+        .map_err(|e| format!("prometheus exporter: {}", e))?;
+    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(prometheus_exporter)
+        .build();
+    let meter = meter_provider.meter("unblock-proxy");
+    init_http_metrics(&meter);
+    init_pii_metrics(&meter);
 
     let openai_base =
         std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string());
@@ -94,13 +117,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .with_state(state)
         };
 
+    let prom_registry = prometheus_registry.clone();
+    let metrics_handler = move || {
+        let prom_registry = prom_registry.clone();
+        async move {
+            use prometheus::Encoder;
+            let encoder = prometheus::TextEncoder::new();
+            let metric_families = prom_registry.gather();
+            let mut buffer = Vec::new();
+            encoder.encode(&metric_families, &mut buffer).unwrap();
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                buffer,
+            )
+        }
+    };
+
     let readyz_route = Router::new()
         .route("/readyz", get(readiness_check))
         .with_state(health_state);
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/metrics", get(metrics_handler))
         .merge(readyz_route)
-        .merge(chat_route);
+        .merge(chat_route)
+        .layer(axum::middleware::from_fn(metrics_layer));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     tracing::info!(%addr, version = env!("CARGO_PKG_VERSION"), "unblock-proxy listening");
