@@ -2,24 +2,25 @@
 //! Phase 3: Redis state, Postgres audit, policy engine.
 //! Sentry: set SENTRY_DSN to enable error tracking.
 
-use unblock_proxy::audit::{pool_from_env, AuditLog};
-use unblock_proxy::handlers::chat::{chat_completions, ChatState};
-use unblock_proxy::ner::NerEngine;
-use unblock_proxy::policy::PolicyEngine;
-use unblock_proxy::state::Store;
 use axum::routing::{get, post};
 use axum::Router;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use unblock_proxy::audit::{pool_from_env, AuditLog};
+use unblock_proxy::handlers::chat::{chat_completions, ChatState};
+use unblock_proxy::ner::NerEngine;
+use unblock_proxy::policy::PolicyEngine;
+use unblock_proxy::state::Store;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    dotenvy::dotenv().ok();
     let _sentry = sentry::init(sentry::ClientOptions {
-    attach_stacktrace: true,
-    ..Default::default()
-});
+        attach_stacktrace: true,
+        ..Default::default()
+    });
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(filter)
@@ -29,18 +30,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let openai_base =
         std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string());
 
-    let store = Store::from_env().await.map_err(|e| format!("store: {}", e))?;
-    let audit_pool = pool_from_env().await.map_err(|e| format!("audit pool: {}", e))?;
+    let store = Store::from_env()
+        .await
+        .map_err(|e| format!("store: {}", e))?;
+    let audit_pool = pool_from_env()
+        .await
+        .map_err(|e| format!("audit pool: {}", e))?;
     let audit = AuditLog::new(audit_pool);
 
-    let policy_path = std::env::var("POLICY_CONFIG_PATH")
-        .unwrap_or_else(|_| "config/policy.yaml".to_string());
+    let policy_path =
+        std::env::var("POLICY_CONFIG_PATH").unwrap_or_else(|_| "config/policy.yaml".to_string());
     let policy_path = PathBuf::from(&policy_path);
     let policy = PolicyEngine::load(&policy_path);
-    if let Ok(dashboard_url) = std::env::var("DASHBOARD_URL") {
+    if let Some(dashboard_url) = std::env::var("DASHBOARD_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+    {
         let proxy_api_key = std::env::var("PROXY_API_KEY").unwrap_or_default();
+        tracing::info!(dashboard_url = %dashboard_url, "policy: remote poll from dashboard");
         unblock_proxy::policy::spawn_remote_poll(policy.clone(), dashboard_url, proxy_api_key);
     } else {
+        tracing::info!(path = %policy_path.display(), "policy: local file watch (reload every 5s)");
         policy.clone().spawn_reload(policy_path.clone(), 5);
     }
 
@@ -58,33 +68,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         policy,
     });
 
-    let chat_route = if let Some(redis_url) = std::env::var("REDIS_URL").ok().filter(|u| !u.is_empty()) {
-        let layer = unblock_proxy::middleware::rate_limit::rate_limit_layer_redis(&redis_url)
-            .await
-            .map_err(|e| format!("rate limit (Redis): {}", e))?;
-        Router::new()
-            .route("/v1/chat/completions", post(chat_completions))
-            .layer(layer)
-            .with_state(state)
-    } else {
-        let layer = unblock_proxy::middleware::rate_limit::rate_limit_layer()
-            .map_err(|e| format!("rate limit layer: {}", e))?;
-        Router::new()
-            .route("/v1/chat/completions", post(chat_completions))
-            .layer(layer)
-            .with_state(state)
-    };
+    let chat_route =
+        if let Some(redis_url) = std::env::var("REDIS_URL").ok().filter(|u| !u.is_empty()) {
+            let layer = unblock_proxy::middleware::rate_limit::rate_limit_layer_redis(&redis_url)
+                .await
+                .map_err(|e| format!("rate limit (Redis): {}", e))?;
+            Router::new()
+                .route("/v1/chat/completions", post(chat_completions))
+                .layer(layer)
+                .with_state(state)
+        } else {
+            let layer = unblock_proxy::middleware::rate_limit::rate_limit_layer()
+                .map_err(|e| format!("rate limit layer: {}", e))?;
+            Router::new()
+                .route("/v1/chat/completions", post(chat_completions))
+                .layer(layer)
+                .with_state(state)
+        };
 
     let app = Router::new()
         .route("/health", get(health))
         .merge(chat_route);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    tracing::info!(%addr, "unblock-proxy listening");
+    tracing::info!(%addr, version = env!("CARGO_PKG_VERSION"), "unblock-proxy listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let make_svc = app.into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, make_svc).await?;
+    axum::serve(listener, make_svc)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    tracing::info!("unblock-proxy shut down");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal received, draining connections...");
 }
 
 /// Health check for load balancers and CI. No PII.
