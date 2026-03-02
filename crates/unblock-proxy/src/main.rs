@@ -55,6 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let openai_base =
         std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string());
+    let anthropic_base = std::env::var("ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
 
     let store = Store::from_env()
         .await
@@ -91,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ner,
         client,
         openai_base,
+        anthropic_base,
         audit,
         policy,
     });

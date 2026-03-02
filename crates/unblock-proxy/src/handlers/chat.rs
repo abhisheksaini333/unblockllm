@@ -88,6 +88,7 @@ pub struct ChatState {
     pub ner: NerEngine,
     pub client: Client,
     pub openai_base: String,
+    pub anthropic_base: String,
     pub audit: AuditLog,
     pub policy: PolicyEngine,
 }
@@ -308,6 +309,7 @@ mod tests {
             ner: NerEngine::from_env().expect("ner"),
             client: reqwest::Client::new(),
             openai_base: "https://api.openai.com".to_string(),
+            anthropic_base: "https://api.anthropic.com".to_string(),
             audit: AuditLog::new(None),
             policy: PolicyEngine::load(std::path::Path::new("/nonexistent")),
         });

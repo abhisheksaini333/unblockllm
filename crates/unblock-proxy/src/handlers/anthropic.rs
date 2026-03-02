@@ -130,9 +130,7 @@ pub async fn anthropic_messages(
         obj.insert("messages".to_string(), messages_val);
     }
 
-    let anthropic_base = std::env::var("ANTHROPIC_BASE_URL")
-        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-    let url = format!("{}/v1/messages", anthropic_base.trim_end_matches('/'));
+    let url = format!("{}/v1/messages", state.anthropic_base.trim_end_matches('/'));
 
     let mut fwd_headers = parts.headers.clone();
     fwd_headers.remove(axum::http::header::CONTENT_LENGTH);
