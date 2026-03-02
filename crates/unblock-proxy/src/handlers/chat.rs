@@ -47,7 +47,7 @@ pub fn init_pii_metrics(meter: &Meter) {
 }
 
 /// Map store errors to HTTP 503 (Block Mode when Redis unavailable).
-fn map_store_error(e: StateError) -> (StatusCode, String) {
+pub fn map_store_error(e: StateError) -> (StatusCode, String) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         format!("Store unavailable: {}", e),
@@ -92,31 +92,24 @@ pub struct ChatState {
     pub policy: PolicyEngine,
 }
 
-/// POST /v1/chat/completions
-pub async fn chat_completions(
-    State(state): State<Arc<ChatState>>,
-    req: Request<Body>,
-) -> Result<Response, (StatusCode, String)> {
-    let request_id = state.store.new_request().await.map_err(map_store_error)?;
-    let (parts, body) = req.into_parts();
-    let body_bytes = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut body_value: serde_json::Value = serde_json::from_slice(&body_bytes)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
-    let mut chat: OpenAiChatRequest = serde_json::from_value(body_value.clone()).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid chat request: {}", e),
-        )
-    })?;
+/// Result of the shared masking pipeline.
+pub struct MaskResult {
+    pub request_id: String,
+    pub mask_elapsed: std::time::Duration,
+}
 
+/// Shared masking pipeline: NER detect → policy filter → mask → store mappings → audit.
+/// Used by both OpenAI and Anthropic handlers.
+pub async fn mask_messages(
+    messages: &mut [ChatMessage],
+    state: &ChatState,
+) -> Result<MaskResult, (StatusCode, String)> {
+    let request_id = state.store.new_request().await.map_err(map_store_error)?;
     let start = Instant::now();
     let mut total_entity_count: u32 = 0;
     let mut entity_type_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Mask each message content (policy filter + block check)
-    for msg in chat.messages.iter_mut() {
+    for msg in messages.iter_mut() {
         let Some(ref content) = msg.content else {
             continue;
         };
@@ -145,12 +138,6 @@ pub async fn chat_completions(
         }
         msg.content = Some(masked);
     }
-    // Write masked messages back into body for forwarding
-    if let Some(obj) = body_value.as_object_mut() {
-        let messages_val = serde_json::to_value(&chat.messages)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        obj.insert("messages".to_string(), messages_val);
-    }
 
     let entity_type_tags: Vec<String> = entity_type_set.into_iter().collect();
     state
@@ -170,6 +157,40 @@ pub async fn chat_completions(
                 &[opentelemetry::KeyValue::new("entity_type", tag.clone())],
             );
         }
+    }
+
+    Ok(MaskResult {
+        request_id,
+        mask_elapsed,
+    })
+}
+
+/// POST /v1/chat/completions
+pub async fn chat_completions(
+    State(state): State<Arc<ChatState>>,
+    req: Request<Body>,
+) -> Result<Response, (StatusCode, String)> {
+    let (parts, body) = req.into_parts();
+    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let mut body_value: serde_json::Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+    let mut chat: OpenAiChatRequest = serde_json::from_value(body_value.clone()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid chat request: {}", e),
+        )
+    })?;
+
+    let mask_result = mask_messages(&mut chat.messages, &state).await?;
+    let request_id = mask_result.request_id;
+
+    // Write masked messages back into body for forwarding
+    if let Some(obj) = body_value.as_object_mut() {
+        let messages_val = serde_json::to_value(&chat.messages)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        obj.insert("messages".to_string(), messages_val);
     }
 
     let url = format!(
@@ -251,10 +272,9 @@ pub async fn chat_completions(
         }
     }
 
-    let total_elapsed = start.elapsed();
     info!(
         request_id = %request_id,
-        total_ms = total_elapsed.as_millis(),
+        mask_ms = mask_result.mask_elapsed.as_millis(),
         status = %status,
         "chat completion done"
     );
