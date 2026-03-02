@@ -13,5 +13,5 @@ pub mod proto {
 }
 
 pub use error::{CoreError, Result};
-pub use types::{RedactionRequest, RedactionResult, EntitySpan, EntityType};
 pub use types::MaskStrategy;
+pub use types::{EntitySpan, EntityType, RedactionRequest, RedactionResult};

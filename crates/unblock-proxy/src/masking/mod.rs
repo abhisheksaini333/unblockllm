@@ -20,7 +20,8 @@ pub fn regex_patterns() -> Vec<(EntityType, Regex)> {
         out.push((EntityType::Email, r));
     }
     // US phone: 10 digits with optional separators
-    if let Ok(r) = Regex::new(r#"\b(?:\+1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b"#) {
+    if let Ok(r) = Regex::new(r#"\b(?:\+1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b"#)
+    {
         out.push((EntityType::Phone, r));
     }
     // SSN: XXX-XX-XXXX
@@ -32,7 +33,7 @@ pub fn regex_patterns() -> Vec<(EntityType, Regex)> {
 
 /// Merge overlapping or adjacent spans; prefer earlier span on tie.
 /// Spans must be sorted by start.
-fn merge_spans(mut spans: Vec<Span>) -> Vec<Span> {
+pub fn merge_spans(mut spans: Vec<Span>) -> Vec<Span> {
     spans.sort_by_key(|s| (s.start, s.end));
     let mut out: Vec<Span> = Vec::new();
     for s in spans {

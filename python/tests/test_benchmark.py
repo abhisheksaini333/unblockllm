@@ -1,7 +1,5 @@
 """Tests for benchmark module. No PII in test data."""
 
-import pytest
-
 
 def test_benchmark_imports() -> None:
     """Ensure benchmark module can be imported."""

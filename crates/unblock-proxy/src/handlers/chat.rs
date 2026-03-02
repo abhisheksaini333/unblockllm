@@ -12,9 +12,9 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use futures_util::stream::StreamExt;
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use opentelemetry::metrics::{Counter, Histogram, Meter};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tracing::info;
@@ -150,8 +150,7 @@ pub async fn mask_messages(
     tracing::debug!(request_id = %request_id, mask_ms = mask_elapsed.as_millis(), "masked request");
 
     if let Some(pii) = PII_METRICS.get() {
-        pii.masking_duration
-            .record(mask_elapsed.as_secs_f64(), &[]);
+        pii.masking_duration.record(mask_elapsed.as_secs_f64(), &[]);
         for tag in &entity_type_tags {
             pii.entities_detected.add(
                 1,

@@ -28,8 +28,8 @@ except ImportError:
 
 # Fallback: onnxruntime only with local .onnx (e.g. downloaded from HF)
 try:
-    import onnxruntime as ort
-    import numpy as np
+    import onnxruntime as ort  # noqa: F401
+    import numpy as np  # noqa: F401
 
     HAS_ONNX = True
 except ImportError:

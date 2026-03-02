@@ -50,6 +50,7 @@ out/
 
 # Model artifacts (downloaded at runtime or CI)
 *.onnx
+models/
 !proto/
 
 # Logs (no PII in logs; still ignore)

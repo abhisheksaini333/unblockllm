@@ -25,7 +25,9 @@ pub struct RedisStore {
 
 impl Clone for RedisStore {
     fn clone(&self) -> Self {
-        Self { conn: Arc::clone(&self.conn) }
+        Self {
+            conn: Arc::clone(&self.conn),
+        }
     }
 }
 
@@ -106,8 +108,10 @@ impl Store {
             Store::Redis(r) => {
                 let key = format!("{}{}", REDIS_KEY_PREFIX, request_id);
                 let mut conn = r.conn.lock().await;
-                let raw: Result<HashMap<String, String>, redis::RedisError> =
-                    redis::cmd("HGETALL").arg(&key).query_async(&mut *conn).await;
+                let raw: Result<HashMap<String, String>, redis::RedisError> = redis::cmd("HGETALL")
+                    .arg(&key)
+                    .query_async(&mut *conn)
+                    .await;
                 Ok(Some(raw.map_err(|e| StateError::Redis(e.to_string()))?))
             }
             Store::Memory(m) => Ok(m.read().await.get(request_id).cloned()),
@@ -136,8 +140,10 @@ impl Store {
         match self {
             Store::Redis(r) => {
                 let mut conn = r.conn.lock().await;
-                let keys: Result<Vec<String>, redis::RedisError> =
-                    redis::cmd("KEYS").arg(format!("{}*", REDIS_KEY_PREFIX)).query_async(&mut *conn).await;
+                let keys: Result<Vec<String>, redis::RedisError> = redis::cmd("KEYS")
+                    .arg(format!("{}*", REDIS_KEY_PREFIX))
+                    .query_async(&mut *conn)
+                    .await;
                 keys.map(|k| k.len()).unwrap_or(0)
             }
             Store::Memory(m) => m.read().await.len(),
@@ -168,7 +174,11 @@ mod tests {
             .insert(&id, "[EMAIL_1]".to_string(), "u@x.com".to_string())
             .await
             .expect("insert");
-        let m = store.get_mapping(&id).await.expect("get_mapping").expect("mapping");
+        let m = store
+            .get_mapping(&id)
+            .await
+            .expect("get_mapping")
+            .expect("mapping");
         assert_eq!(m.get("[EMAIL_1]").map(String::as_str), Some("u@x.com"));
         store.remove(&id).await.expect("remove");
         assert!(store.get_mapping(&id).await.expect("get_mapping").is_none());

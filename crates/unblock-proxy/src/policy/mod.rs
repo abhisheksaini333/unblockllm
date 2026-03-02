@@ -27,6 +27,11 @@ impl PolicyEngine {
         Self(Arc::new(RwLock::new(config)))
     }
 
+    /// Build from explicit mask/block lists (useful for tests and programmatic config).
+    pub fn from_config(mask: Vec<String>, block: Vec<String>) -> Self {
+        Self(Arc::new(RwLock::new(PolicyConfig { mask, block })))
+    }
+
     fn load_config(path: &Path) -> PolicyConfig {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
@@ -48,19 +53,29 @@ impl PolicyEngine {
     /// Whether to mask this entity type (policy says mask, and not in block).
     pub async fn should_mask(&self, entity_tag: &str) -> bool {
         let config = self.0.read().await;
-        if config.block.iter().any(|s| s.eq_ignore_ascii_case(entity_tag)) {
+        if config
+            .block
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(entity_tag))
+        {
             return false; // blocked type: caller should reject request
         }
         if config.mask.is_empty() {
             return true; // mask all
         }
-        config.mask.iter().any(|s| s.eq_ignore_ascii_case(entity_tag))
+        config
+            .mask
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(entity_tag))
     }
 
     /// Whether this entity type is in the block list (request should be rejected).
     pub async fn is_blocked(&self, entity_tag: &str) -> bool {
         let config = self.0.read().await;
-        config.block.iter().any(|s| s.eq_ignore_ascii_case(entity_tag))
+        config
+            .block
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(entity_tag))
     }
 
     /// Spawn a task that reloads policy from path every `interval_secs`.
@@ -104,9 +119,7 @@ pub fn spawn_remote_poll(policy: PolicyEngine, dashboard_url: String, proxy_api_
         let mut ticker = interval(Duration::from_secs(30));
         loop {
             ticker.tick().await;
-            let req = client
-                .get(&url)
-                .header("X-Proxy-API-Key", &proxy_api_key);
+            let req = client.get(&url).header("X-Proxy-API-Key", &proxy_api_key);
             match req.send().await {
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<RemotePolicyResponse>().await {
@@ -178,5 +191,36 @@ mod tests {
         let engine = PolicyEngine::load(Path::new("/nonexistent"));
         assert!(engine.should_mask("EMAIL").await);
         assert!(!engine.is_blocked("EMAIL").await);
+    }
+
+    #[tokio::test]
+    async fn policy_block_rejects_email() {
+        let engine = PolicyEngine(Arc::new(RwLock::new(PolicyConfig {
+            mask: vec!["EMAIL".to_string(), "PHONE".to_string()],
+            block: vec!["EMAIL".to_string()],
+        })));
+        assert!(engine.is_blocked("EMAIL").await);
+        assert!(!engine.is_blocked("PHONE").await);
+    }
+
+    #[tokio::test]
+    async fn filter_spans_blocked_returns_error() {
+        let engine = PolicyEngine(Arc::new(RwLock::new(PolicyConfig {
+            mask: vec!["EMAIL".to_string()],
+            block: vec!["EMAIL".to_string()],
+        })));
+        let spans = vec![crate::masking::Span {
+            start: 0,
+            end: 16,
+            entity_type: unblock_core::EntityType::Email,
+        }];
+        let result = filter_spans_by_policy(&engine, &spans).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PolicyBlockError::Blocked(ref t) if t == "EMAIL"),
+            "Expected Blocked(EMAIL), got {:?}",
+            err
+        );
     }
 }

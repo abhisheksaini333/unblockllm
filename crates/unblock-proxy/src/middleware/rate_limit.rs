@@ -1,19 +1,22 @@
 //! Rate limiting middleware. In-memory (tower_governor) or Redis-backed (SEC-04) when REDIS_URL set.
 //! RATE_LIMIT_PER_SECOND (default 1000); burst = 2 * per_second for in-memory.
 
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Request, Response, StatusCode};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::{Request, Response, StatusCode};
 use tower::{Layer, Service};
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_governor::GovernorLayer;
 
-type GovernorLayerType = GovernorLayer<PeerIpKeyExtractor, governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>>;
+type GovernorLayerType = GovernorLayer<
+    PeerIpKeyExtractor,
+    governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
+>;
 
 const RL_PREFIX: &str = "unblock:rl:";
 
@@ -34,7 +37,10 @@ pub fn rate_limit_layer() -> Result<GovernorLayerType, Box<dyn std::error::Error
         .const_per_millisecond(period_ms.max(1))
         .const_burst_size(burst.max(1));
     let config = builder.finish().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "rate limit config: invalid builder state")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "rate limit config: invalid builder state",
+        )
     })?;
     Ok(GovernorLayer {
         config: Arc::new(config),
@@ -84,7 +90,9 @@ where
 {
     type Response = Response<Body>;
     type Error = S::Error;
-    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -93,7 +101,10 @@ where
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         let conn = Arc::clone(&self.conn);
         let per_second = self.per_second;
-        let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0);
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0);
         let mut inner = self.inner.clone();
 
         let fut = async move {
@@ -114,7 +125,11 @@ where
                 }
             };
             if count == 1 {
-                let _: Result<(), _> = redis::cmd("EXPIRE").arg(&key).arg(1).query_async(&mut *conn).await;
+                let _: Result<(), _> = redis::cmd("EXPIRE")
+                    .arg(&key)
+                    .arg(1)
+                    .query_async(&mut *conn)
+                    .await;
             }
             drop(conn);
             if count > per_second as i64 {

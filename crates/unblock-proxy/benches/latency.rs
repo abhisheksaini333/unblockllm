@@ -28,5 +28,9 @@ fn main() {
     println!("mask_mean_us={:.2}", mask_mean_us);
     println!("reidentify_mean_us={:.2}", reid_mean_us);
     println!("total_overhead_ms={:.4}", total_mean_ms);
-    assert!(total_mean_ms < 20.0, "total overhead must be <20ms (got {:.4}ms)", total_mean_ms);
+    assert!(
+        total_mean_ms < 20.0,
+        "total overhead must be <20ms (got {:.4}ms)",
+        total_mean_ms
+    );
 }
