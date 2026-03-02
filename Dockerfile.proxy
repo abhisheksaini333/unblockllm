@@ -1,5 +1,8 @@
 # Production proxy image: multi-stage, distroless, non-root. Target <100MB.
 # Build from repo root: docker build -f Dockerfile.proxy .
+# Skip ONNX model: docker build -f Dockerfile.proxy --build-arg INCLUDE_ONNX_MODEL=false .
+
+ARG INCLUDE_ONNX_MODEL=true
 
 # Use bookworm (latest stable) for edition2024-capable Cargo (transitive deps)
 FROM rust:bookworm AS builder
@@ -15,9 +18,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compil
 RUN cargo build --release --package unblock-proxy && \
     strip /build/target/release/unblock-proxy
 
+# Download ONNX NER model from HuggingFace (if enabled)
+FROM python:3.11-slim AS model-downloader
+ARG INCLUDE_ONNX_MODEL
+RUN if [ "$INCLUDE_ONNX_MODEL" = "true" ]; then \
+        pip install --no-cache-dir huggingface-hub && \
+        huggingface-cli download protectai/bert-base-NER-onnx \
+            --local-dir /models/bert-base-NER-onnx \
+            --local-dir-use-symlinks False; \
+    else \
+        mkdir -p /models/bert-base-NER-onnx; \
+    fi
+
 # Runtime: distroless cc (glibc); non-root
 FROM gcr.io/distroless/cc-debian12:nonroot
 USER nonroot:nonroot
 EXPOSE 8080
 COPY --from=builder /build/target/release/unblock-proxy /unblock-proxy
+COPY --from=model-downloader /models /models
+ENV NER_MODEL_DIR=/models/bert-base-NER-onnx
 ENTRYPOINT ["/unblock-proxy"]
