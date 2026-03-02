@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use unblock_proxy::audit::{pool_from_env, AuditLog};
 use unblock_proxy::handlers::chat::{chat_completions, ChatState};
+use unblock_proxy::handlers::health::{health_check, readiness_check, HealthState};
 use unblock_proxy::ner::NerEngine;
 use unblock_proxy::policy::PolicyEngine;
 use unblock_proxy::state::Store;
@@ -55,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let ner = NerEngine::from_env().map_err(|e| format!("NER engine: {}", e))?;
+    let ner_loaded = ner.has_onnx_model();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
@@ -66,6 +68,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         openai_base,
         audit,
         policy,
+    });
+
+    let health_state = Arc::new(HealthState {
+        store: state.store.clone(),
+        audit: state.audit.clone(),
+        ner_loaded,
     });
 
     let chat_route =
@@ -86,8 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .with_state(state)
         };
 
+    let readyz_route = Router::new()
+        .route("/readyz", get(readiness_check))
+        .with_state(health_state);
     let app = Router::new()
-        .route("/health", get(health))
+        .route("/health", get(health_check))
+        .merge(readyz_route)
         .merge(chat_route);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
@@ -123,11 +135,6 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received, draining connections...");
 }
 
-/// Health check for load balancers and CI. No PII.
-async fn health() -> &'static str {
-    "ok"
-}
-
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -135,10 +142,11 @@ mod tests {
     use axum::Router;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+    use unblock_proxy::handlers::health::health_check;
 
     #[tokio::test]
     async fn health_returns_ok() {
-        let app = Router::new().route("/health", axum::routing::get(super::health));
+        let app = Router::new().route("/health", axum::routing::get(health_check));
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
@@ -146,6 +154,8 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = res.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body.as_ref(), b"ok");
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(json["version"].is_string());
     }
 }

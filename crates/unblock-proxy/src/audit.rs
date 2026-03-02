@@ -58,6 +58,14 @@ impl AuditLog {
         Self(pool.map(Arc::new))
     }
 
+    /// Ping the database. Returns true if connected, false if no pool or query fails.
+    pub async fn ping(&self) -> bool {
+        match &self.0 {
+            Some(pool) => sqlx::query("SELECT 1").execute(pool.as_ref()).await.is_ok(),
+            None => true,
+        }
+    }
+
     /// Log request metadata. No PII. entity_types = e.g. ["EMAIL", "PHONE"].
     pub async fn log(
         &self,
@@ -67,7 +75,14 @@ impl AuditLog {
         entity_types: &[String],
     ) {
         if let Some(ref pool) = self.0 {
-            if let Err(e) = write(pool.as_ref(), request_id, user_id, entity_count, entity_types).await
+            if let Err(e) = write(
+                pool.as_ref(),
+                request_id,
+                user_id,
+                entity_count,
+                entity_types,
+            )
+            .await
             {
                 tracing::warn!(request_id = %request_id, error = %e, "audit write failed");
             }
@@ -97,6 +112,12 @@ mod tests {
     #[tokio::test]
     async fn audit_log_no_pool_is_noop() {
         let log = AuditLog::new(None);
-        log.log("req-1", None, 2, &["EMAIL".to_string(), "PHONE".to_string()]).await;
+        log.log(
+            "req-1",
+            None,
+            2,
+            &["EMAIL".to_string(), "PHONE".to_string()],
+        )
+        .await;
     }
 }
