@@ -26,7 +26,7 @@ pub struct PiiMetrics {
     pub upstream_duration: Histogram<f64>,
 }
 
-static PII_METRICS: OnceLock<PiiMetrics> = OnceLock::new();
+pub static PII_METRICS: OnceLock<PiiMetrics> = OnceLock::new();
 
 /// Initialize PII-specific metrics. Call once at startup.
 pub fn init_pii_metrics(meter: &Meter) {

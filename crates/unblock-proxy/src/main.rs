@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use unblock_proxy::audit::{pool_from_env, AuditLog};
+use unblock_proxy::handlers::anthropic::anthropic_messages;
 use unblock_proxy::handlers::chat::{chat_completions, init_pii_metrics, ChatState};
 use unblock_proxy::handlers::health::{health_check, readiness_check, HealthState};
 use unblock_proxy::middleware::metrics::{init_http_metrics, metrics_layer};
@@ -107,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map_err(|e| format!("rate limit (Redis): {}", e))?;
             Router::new()
                 .route("/v1/chat/completions", post(chat_completions))
+                .route("/v1/messages", post(anthropic_messages))
                 .layer(layer)
                 .with_state(state)
         } else {
@@ -114,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map_err(|e| format!("rate limit layer: {}", e))?;
             Router::new()
                 .route("/v1/chat/completions", post(chat_completions))
+                .route("/v1/messages", post(anthropic_messages))
                 .layer(layer)
                 .with_state(state)
         };
