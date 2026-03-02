@@ -13,6 +13,7 @@ use unblock_proxy::audit::{pool_from_env, AuditLog};
 use unblock_proxy::handlers::chat::{chat_completions, init_pii_metrics, ChatState};
 use unblock_proxy::handlers::health::{health_check, readiness_check, HealthState};
 use unblock_proxy::middleware::metrics::{init_http_metrics, metrics_layer};
+use unblock_proxy::middleware::request_id::request_id_layer;
 use unblock_proxy::ner::NerEngine;
 use unblock_proxy::policy::PolicyEngine;
 use unblock_proxy::state::Store;
@@ -144,7 +145,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .route("/metrics", get(metrics_handler))
         .merge(readyz_route)
         .merge(chat_route)
-        .layer(axum::middleware::from_fn(metrics_layer));
+        .layer(axum::middleware::from_fn(metrics_layer))
+        .layer(axum::middleware::from_fn(request_id_layer));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     tracing::info!(%addr, version = env!("CARGO_PKG_VERSION"), "unblock-proxy listening");
